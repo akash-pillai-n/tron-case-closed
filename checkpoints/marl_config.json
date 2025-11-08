@@ -1,0 +1,8 @@
+{
+  "num_agents": 3,
+  "in_channels": 6,
+  "num_scalar_features": 4,
+  "num_actions": 8,
+  "width": 20,
+  "height": 18
+}

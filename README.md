@@ -85,3 +85,65 @@ This template provides a few key files to get you started. Here's what each one 
 * Due to platform and build-time constraints, participants are limited to **CPU-only PyTorch**; GPU-enabled versions, including CUDA builds, are disallowed. Any other heavy-duty GPU or large ML frameworks (like Tensorflow, JAX) will not be allowed.
 * Ensure your agent's `requirements.txt` is complete before pushing changes.
 * If you run into any issues, take a look at your own agent first before asking for help.
+
+
+### RL Training and Evaluation (optional, local-only)
+We provide a minimal RL scaffold that does NOT add PyTorch to `requirements.txt`. Train and evaluate locally with a CPU-only PyTorch you install on your machine. The runtime agent will fall back to a heuristic policy if PyTorch or a checkpoint is unavailable.
+
+#### Standard 2-Agent Training
+Files:
+* `rl/env_wrapper.py`: Training environment honoring README rules (max 500 turns, head-on = draw).
+* `rl/model.py`: Tiny DQN for discrete actions (UP/DOWN/LEFT/RIGHT with optional BOOST).
+* `rl/replay_buffer.py`: Simple experience replay.
+* `train.py`: Self-play loop; saves checkpoints under `checkpoints/`.
+* `eval.py`: Quick evaluation against a simple scripted opponent.
+* `inference_config.json`: Optional knobs for inference behavior (e.g., conservative boost).
+
+Usage:
+1. Install CPU-only PyTorch locally (do not add to requirements.txt).
+2. Train:
+   - `python train.py`
+   - Checkpoints are stored under `checkpoints/latest.pt`.
+3. Evaluate:
+   - `python eval.py`
+4. Run a match via judge (separate terminals):
+   - `python agent.py` (port 5008 by default)
+   - `python sample_agent.py` (port 5009 by default)
+   - `python judge_engine.py`
+
+#### Multi-Agent Training (6+ agents)
+For advanced training with 6+ simultaneous agents using safety shields and blocking strategies:
+
+Files:
+* `rl/ma_env.py`: Multi-agent environment with N agents, simultaneous moves, 500-turn cap.
+* `rl/ma_encoder.py`: Observation encoder with occupancy, heads, danger maps, Voronoi partitioning.
+* `rl/ma_safety_shield.py`: Action masking, 2-step collision checks, deadlock avoidance, flood-fill area scoring.
+* `rl/ma_blocking.py`: Voronoi territory analysis, choke detection, aggressive blocking strategies.
+* `train_ma.py`: Multi-agent self-play with opponent pool (random, greedy, frozen policy).
+* `eval_ma.py`: Evaluation with survival rate, win rate, blocks-caused, head-on metrics.
+* `agent_logic_ma.py`: Multi-agent inference logic with safety shield and aggressive blocking.
+
+Usage:
+1. Install CPU-only PyTorch locally.
+2. Train multi-agent:
+   ```bash
+   python train_ma.py --num_agents 6 --episodes 5000
+   ```
+   - Checkpoints saved to `checkpoints/marl_latest.pt` and `checkpoints/marl_config.json`.
+3. Evaluate multi-agent:
+   ```bash
+   python eval_ma.py --num_agents 6 --episodes 100
+   ```
+   - Results saved to `eval_results/ma_eval_6agents.json`.
+4. Run match (agent.py automatically uses multi-agent logic if available):
+   - `python agent.py` (loads `marl_latest.pt` if present, else `latest.pt`, else heuristic)
+
+Multi-Agent Features:
+* **Safety Shield**: Never crashes into walls or trails; avoids deadlocks via flood-fill area checks.
+* **Blocking Strategy**: Uses Voronoi partitioning to identify opponent territories and prioritizes moves that reduce opponent space.
+* **Boost Intelligence**: Only uses boosts when they increase reachable area or enable escapes.
+* **Deadlock Avoidance**: Detects narrow corridors and low-area traps; prefers actions that maximize future options.
+* **Backward Compatible**: Works with standard 2-agent judge payloads.
+
+Runtime behavior:
+* On startup of `/send-move`, the agent attempts to load `checkpoints/marl_latest.pt` (multi-agent), then `checkpoints/latest.pt` (2-agent), and `inference_config.json`. If unavailable or PyTorch is not present, it uses a safe heuristic with flood-fill area scoring and conservative BOOST usage.

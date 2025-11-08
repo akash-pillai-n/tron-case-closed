@@ -29,8 +29,8 @@ LAST_POSTED_STATE = {}
 
 game_lock = Lock()
  
-PARTICIPANT = "ParticipantX"
-AGENT_NAME = "AgentX"
+PARTICIPANT = "TestAgent"
+AGENT_NAME = "SelfPlayAgent"
 
 MODEL_LOADED = False
 MODEL_DEVICE = "cpu"
@@ -99,41 +99,35 @@ def _load_model_once():
             model.load_state_dict(data)
         model.eval()
         QNET = model  # type: ignore
-        print(f"Loaded model from {os.path.basename(ckpt_path)}")
+        print(f"Test Agent: Loaded model from {os.path.basename(ckpt_path)}")
     except Exception as e:
-        print(f"Failed to load model: {e}")
+        print(f"Test Agent: Failed to load model: {e}")
         QNET = None
 
+
 @app.route("/", methods=["GET"])
-def info():
-    """Basic health/info endpoint used by the judge to check connectivity.
+def home():
+    """Health check endpoint. Returns participant and agent name."""
+    return jsonify({
+        "participant": PARTICIPANT,
+        "agent_name": AGENT_NAME,
+        "status": "ready"
+    }), 200
 
-    Returns participant and agent_name (so Judge.check_latency can create Agent objects).
-    """
-    return jsonify({"participant": PARTICIPANT, "agent_name": AGENT_NAME}), 200
 
-
-def _update_local_game_from_post(data: dict):
-    """Update the local GLOBAL_GAME using the JSON posted by the judge.
-
-    The judge posts a dictionary with keys matching the Judge.send_state payload
-    (board, agent1_trail, agent2_trail, agent1_length, agent2_length, agent1_alive,
-    agent2_alive, agent1_boosts, agent2_boosts, turn_count).
-    """
+def _update_local_game_from_post(data):
+    """Update local game state from judge's POST data."""
     with game_lock:
-        LAST_POSTED_STATE.clear()
-        LAST_POSTED_STATE.update(data)
-
+        global LAST_POSTED_STATE
+        LAST_POSTED_STATE = data
         if "board" in data:
-            try:
-                GLOBAL_GAME.board.grid = data["board"]
-            except Exception:
-                pass
-
+            GLOBAL_GAME.board.grid = data["board"]
         if "agent1_trail" in data:
-            GLOBAL_GAME.agent1.trail = deque(tuple(p) for p in data["agent1_trail"]) 
+            trail = data["agent1_trail"]
+            GLOBAL_GAME.agent1.trail = deque(trail, maxlen=len(trail))
         if "agent2_trail" in data:
-            GLOBAL_GAME.agent2.trail = deque(tuple(p) for p in data["agent2_trail"]) 
+            trail = data["agent2_trail"]
+            GLOBAL_GAME.agent2.trail = deque(trail, maxlen=len(trail))
         if "agent1_length" in data:
             GLOBAL_GAME.agent1.length = int(data["agent1_length"])
         if "agent2_length" in data:
@@ -191,16 +185,26 @@ def send_move():
 
 @app.route("/end", methods=["POST"])
 def end_game():
-    """Judge notifies agent that the match finished and provides final state.
-
-    We update local state for record-keeping and return OK.
+    """Judge calls this to notify the agent that the game has ended.
+    
+    The agent can use this to clean up resources or log final stats.
     """
     data = request.get_json()
-    if data:
-        _update_local_game_from_post(data)
+    result = data.get("result", "UNKNOWN") if data else "UNKNOWN"
+    print(f"Test Agent: Game ended with result: {result}")
     return jsonify({"status": "acknowledged"}), 200
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "5008"))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    import sys
+    port = 5009  # Default port for player 2 (same as sample_agent)
+    if len(sys.argv) > 1:
+        try:
+            port = int(sys.argv[1])
+        except ValueError:
+            print(f"Invalid port: {sys.argv[1]}, using default 5009")
+    
+    print(f"Test Agent starting on port {port}...")
+    print(f"Using {'multi-agent' if USE_MA_LOGIC else '2-agent'} logic")
+    app.run(host="0.0.0.0", port=port, debug=False)
+

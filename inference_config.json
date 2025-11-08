@@ -1,0 +1,7 @@
+{
+  "turn_normalize_divisor": 500.0,
+  "conservative_boost": true,
+  "boost_margin": 0.1
+}
+
+

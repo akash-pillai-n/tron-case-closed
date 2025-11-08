@@ -1,5 +1,10 @@
+"""
+Test agent with added randomness (epsilon-greedy) to break determinism.
+Use this for self-play testing to get more varied results.
+"""
 import os
 import uuid
+import random
 from flask import Flask, request, jsonify
 from threading import Lock
 from collections import deque
@@ -8,10 +13,10 @@ from case_closed_game import Game, Direction, GameResult
 
 # Try multi-agent logic first, fallback to original
 try:
-    from agent_logic_ma import choose_move_ma_aggressive as choose_move
+    from agent_logic_ma import choose_move_ma_aggressive as choose_move_base
     USE_MA_LOGIC = True
 except ImportError:
-    from agent_logic import choose_move
+    from agent_logic import choose_move as choose_move_base
     USE_MA_LOGIC = False
 
 try:
@@ -19,7 +24,7 @@ try:
     from rl.model import DQN
 except Exception:
     torch = None
-    DQN = None  # type: ignore
+    DQN = None
 
 # Flask API server setup
 app = Flask(__name__)
@@ -29,26 +34,27 @@ LAST_POSTED_STATE = {}
 
 game_lock = Lock()
  
-PARTICIPANT = "ParticipantX"
-AGENT_NAME = "AgentX"
+PARTICIPANT = "TestAgentRandom"
+AGENT_NAME = "SelfPlayAgentWithExploration"
 
 MODEL_LOADED = False
 MODEL_DEVICE = "cpu"
 QNET = None
 INFERENCE_CONFIG = {}
 
+# Exploration parameter
+EPSILON = 0.15  # 15% random moves to add variety
+
 def _load_model_once():
     global MODEL_LOADED, QNET, INFERENCE_CONFIG
     if MODEL_LOADED:
         return
     MODEL_LOADED = True
-    # Try to load latest checkpoint if torch is available
     if torch is None or DQN is None:
-        pass
-    import os
-    # Load optional inference config
+        return
+    
+    import json
     try:
-        import json
         cfg_path = os.path.join(os.getcwd(), "inference_config.json")
         if os.path.isfile(cfg_path):
             with open(cfg_path, "r") as f:
@@ -56,8 +62,6 @@ def _load_model_once():
     except Exception:
         INFERENCE_CONFIG = {}
 
-    if torch is None or DQN is None:
-        return
     ckpt_candidates = []
     checkpoints_dir = os.path.join(os.getcwd(), "checkpoints")
     if os.path.isdir(checkpoints_dir):
@@ -66,6 +70,7 @@ def _load_model_once():
                 ckpt_candidates.append(os.path.join(checkpoints_dir, name))
     if not ckpt_candidates:
         return
+    
     # Prefer 'marl_latest.pt' for multi-agent, then 'latest.pt'
     ckpt_path = None
     for p in ckpt_candidates:
@@ -81,9 +86,9 @@ def _load_model_once():
     if ckpt_path is None:
         ckpt_candidates.sort()
         ckpt_path = ckpt_candidates[-1]
+    
     try:
         data = torch.load(ckpt_path, map_location="cpu")
-        # Handle both dict and direct state_dict formats
         if isinstance(data, dict) and "model_state_dict" in data:
             in_channels = int(data.get("in_channels", 6))
             num_actions = int(data.get("num_actions", 8))
@@ -91,49 +96,59 @@ def _load_model_once():
             model = DQN(in_channels=in_channels, num_actions=num_actions, num_scalar_features=num_scalar_features)
             model.load_state_dict(data["model_state_dict"])
         else:
-            # Direct state dict - infer from checkpoint name
             if "marl" in os.path.basename(ckpt_path):
                 model = DQN(in_channels=6, num_actions=8, num_scalar_features=4)
             else:
                 model = DQN(in_channels=4, num_actions=8, num_scalar_features=3)
             model.load_state_dict(data)
         model.eval()
-        QNET = model  # type: ignore
-        print(f"Loaded model from {os.path.basename(ckpt_path)}")
+        QNET = model
+        print(f"Test Agent (Random): Loaded model from {os.path.basename(ckpt_path)}")
+        print(f"Test Agent (Random): Using epsilon={EPSILON} for exploration")
     except Exception as e:
-        print(f"Failed to load model: {e}")
+        print(f"Test Agent (Random): Failed to load model: {e}")
         QNET = None
 
+
+def choose_move_with_exploration(state, player_number, qnet, device, config):
+    """Choose move with epsilon-greedy exploration."""
+    # With probability epsilon, choose a random valid move
+    if random.random() < EPSILON:
+        # Get valid actions from state
+        board = state.get("board", [])
+        if board:
+            # Simple random move (UP, DOWN, LEFT, RIGHT)
+            directions = ["UP", "DOWN", "LEFT", "RIGHT"]
+            return random.choice(directions)
+    
+    # Otherwise use the trained policy
+    return choose_move_base(state, player_number, qnet=qnet, device=device, config=config)
+
+
 @app.route("/", methods=["GET"])
-def info():
-    """Basic health/info endpoint used by the judge to check connectivity.
+def home():
+    """Health check endpoint."""
+    return jsonify({
+        "participant": PARTICIPANT,
+        "agent_name": AGENT_NAME,
+        "epsilon": EPSILON,
+        "status": "ready"
+    }), 200
 
-    Returns participant and agent_name (so Judge.check_latency can create Agent objects).
-    """
-    return jsonify({"participant": PARTICIPANT, "agent_name": AGENT_NAME}), 200
 
-
-def _update_local_game_from_post(data: dict):
-    """Update the local GLOBAL_GAME using the JSON posted by the judge.
-
-    The judge posts a dictionary with keys matching the Judge.send_state payload
-    (board, agent1_trail, agent2_trail, agent1_length, agent2_length, agent1_alive,
-    agent2_alive, agent1_boosts, agent2_boosts, turn_count).
-    """
+def _update_local_game_from_post(data):
+    """Update local game state from judge's POST data."""
     with game_lock:
-        LAST_POSTED_STATE.clear()
-        LAST_POSTED_STATE.update(data)
-
+        global LAST_POSTED_STATE
+        LAST_POSTED_STATE = data
         if "board" in data:
-            try:
-                GLOBAL_GAME.board.grid = data["board"]
-            except Exception:
-                pass
-
+            GLOBAL_GAME.board.grid = data["board"]
         if "agent1_trail" in data:
-            GLOBAL_GAME.agent1.trail = deque(tuple(p) for p in data["agent1_trail"]) 
+            trail = data["agent1_trail"]
+            GLOBAL_GAME.agent1.trail = deque(trail, maxlen=len(trail))
         if "agent2_trail" in data:
-            GLOBAL_GAME.agent2.trail = deque(tuple(p) for p in data["agent2_trail"]) 
+            trail = data["agent2_trail"]
+            GLOBAL_GAME.agent2.trail = deque(trail, maxlen=len(trail))
         if "agent1_length" in data:
             GLOBAL_GAME.agent1.length = int(data["agent1_length"])
         if "agent2_length" in data:
@@ -152,10 +167,7 @@ def _update_local_game_from_post(data: dict):
 
 @app.route("/send-state", methods=["POST"])
 def receive_state():
-    """Judge calls this to push the current game state to the agent server.
-
-    The agent should update its local representation and return 200.
-    """
+    """Receive game state from judge."""
     data = request.get_json()
     if not data:
         return jsonify({"error": "no json body"}), 400
@@ -165,42 +177,37 @@ def receive_state():
 
 @app.route("/send-move", methods=["GET"])
 def send_move():
-    """Judge calls this (GET) to request the agent's move for the current tick.
-
-    Query params the judge sends (optional): player_number, attempt_number,
-    random_moves_left, turn_count. Agents can use this to decide.
-    
-    Return format: {"move": "DIRECTION"} or {"move": "DIRECTION:BOOST"}
-    where DIRECTION is UP, DOWN, LEFT, or RIGHT
-    and :BOOST is optional to use a speed boost (move twice)
-    """
+    """Return agent's move with epsilon-greedy exploration."""
     player_number = request.args.get("player_number", default=1, type=int)
 
     with game_lock:
-        state = dict(LAST_POSTED_STATE)   
-        my_agent = GLOBAL_GAME.agent1 if player_number == 1 else GLOBAL_GAME.agent2
-        boosts_remaining = my_agent.boosts_remaining
+        state = dict(LAST_POSTED_STATE)
    
-    # -----------------your code here-------------------
     _load_model_once()
-    move = choose_move(state, player_number, qnet=QNET, device=MODEL_DEVICE, config=INFERENCE_CONFIG)
-    # -----------------end code here--------------------
+    move = choose_move_with_exploration(state, player_number, qnet=QNET, device=MODEL_DEVICE, config=INFERENCE_CONFIG)
 
     return jsonify({"move": move}), 200
 
 
 @app.route("/end", methods=["POST"])
 def end_game():
-    """Judge notifies agent that the match finished and provides final state.
-
-    We update local state for record-keeping and return OK.
-    """
+    """Game ended notification."""
     data = request.get_json()
-    if data:
-        _update_local_game_from_post(data)
+    result = data.get("result", "UNKNOWN") if data else "UNKNOWN"
+    print(f"Test Agent (Random): Game ended with result: {result}")
     return jsonify({"status": "acknowledged"}), 200
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "5008"))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    import sys
+    port = 5009
+    if len(sys.argv) > 1:
+        try:
+            port = int(sys.argv[1])
+        except ValueError:
+            print(f"Invalid port: {sys.argv[1]}, using default 5009")
+    
+    print(f"Test Agent (Random) starting on port {port}...")
+    print(f"Using {'multi-agent' if USE_MA_LOGIC else '2-agent'} logic with epsilon={EPSILON}")
+    app.run(host="0.0.0.0", port=port, debug=False)
+
